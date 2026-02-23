@@ -879,48 +879,33 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
 
 
-// ---- 2) Sumo edge detector: uses the same thresholds as line tracking ----
+// ---- 2) Sumo edge detector: detects the black boundary line of the ring ----
+// Ring surface (white/light) reads low (~250), black boundary reads high (~750-870).
+// Returns true when any sensor crosses onto the black edge.
 bool ApplicationFunctionSet::Sumo_EdgeDetected(void)
 {
-  // Per-sensor thresholds from your logs:
-  // L: black ~185, white ~55-63
-  // M: black ~430-470, white ~318-340
-  // R: black ~322-360, white ~190-221
-  // const uint16_t ENTER_BLACK_L = 123;
-  // const uint16_t ENTER_BLACK_M = 385;
-  // const uint16_t ENTER_BLACK_R = 272;
+  // Shared hysteresis thresholds for all sensors:
+  // ENTER_BLACK: sensor must rise above this to be considered on the black edge
+  // EXIT_BLACK:  sensor must drop below this to be considered back on the ring
+  const int ENTER_BLACK = 850;
+  const int EXIT_BLACK  = 250;
 
-  // // Hysteresis (lower exit threshold avoids chatter near boundary)
-  // const uint16_t EXIT_BLACK_L = 108;
-  // const uint16_t EXIT_BLACK_M = 365;
-  // const uint16_t EXIT_BLACK_R = 250;
-
-  // Enter black
-  const int ENTER_BLACK_L = 72;
-  const int ENTER_BLACK_M = 385;
-  const int ENTER_BLACK_R = 265;
-
-  // Exit black (must drop lower before considered white/edge)
-  const int EXIT_BLACK_L  = 60;
-  const int EXIT_BLACK_M  = 325;
-  const int EXIT_BLACK_R  = 245;
-
-  static bool on_black_l = true;
-  static bool on_black_m = true;
-  static bool on_black_r = true;
+  static bool on_black_l = false;
+  static bool on_black_m = false;
+  static bool on_black_r = false;
   static uint8_t edge_confirm = 0;
 
-  auto update_state = [](uint16_t value, uint16_t enter_thr, uint16_t exit_thr, bool prev) -> bool
+  auto update_state = [](uint16_t value, int enter_thr, int exit_thr, bool prev) -> bool
   {
-    if (prev) return (value >= exit_thr);   // stay black until we go clearly low
-    return (value >= enter_thr);            // re-enter black only when clearly high
+    if (prev) return (value > exit_thr);    // stay black until reading drops clearly low
+    return (value >= enter_thr);            // enter black only when reading goes clearly high
   };
 
-  on_black_l = update_state(TrackingData_L, ENTER_BLACK_L, EXIT_BLACK_L, on_black_l);
-  on_black_m = update_state(TrackingData_M, ENTER_BLACK_M, EXIT_BLACK_M, on_black_m);
-  on_black_r = update_state(TrackingData_R, ENTER_BLACK_R, EXIT_BLACK_R, on_black_r);
+  on_black_l = update_state(TrackingData_L, ENTER_BLACK, EXIT_BLACK, on_black_l);
+  on_black_m = update_state(TrackingData_M, ENTER_BLACK, EXIT_BLACK, on_black_m);
+  on_black_r = update_state(TrackingData_R, ENTER_BLACK, EXIT_BLACK, on_black_r);
 
-  const bool edge_now = (!on_black_l) || (!on_black_m) || (!on_black_r);
+  const bool edge_now = on_black_l || on_black_m || on_black_r;
 
   // 2-cycle debounce
   if (edge_now)

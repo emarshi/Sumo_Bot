@@ -100,6 +100,7 @@ Application_xxx Application_SmartRobotCarxxx0;
 bool ApplicationFunctionSet_SmartRobotCarLeaveTheGround(void);
 void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint8_t UpperLimit);
 void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotionControl direction, uint8_t is_speed);
+static bool Sumo_ScanOpponentDirection_ServoControls(uint16_t chase_cm, uint16_t lost_cm, uint8_t ang_left_deg, uint8_t ang_center_deg, uint8_t ang_right_deg, int8_t &dir_out, uint16_t &best_cm_out);
 
 void ApplicationFunctionSet::ApplicationFunctionSet_Init(void)
 {
@@ -222,7 +223,7 @@ static void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotio
     break;
   case Follow_mode:
     Kp = 2;
-    UpperLimit = 180;
+    UpperLimit = 400;
     break;
   case CMD_CarControl_TimeLimit:
     Kp = 2;
@@ -764,162 +765,200 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Obstacle(void)
 /*
   Following mode：
 */
+// Adapted scan helper to use DeviceDriverSet_Servo_controls(Servo, Position_angle)
+// Your servo driver expects "Position_angle" in *steps* (1..17) and writes 10*step degrees.
+// So we pass steps, not degrees.
+//
+// Assumption: your ultrasonic is on Servo_z => Servo channel 1.
+// If it's on Servo_y instead, change SERVO_ULTRASONIC from 1 -> 2.
 void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 {
   // --- Tunables ---
   const uint16_t ATTACK_CM = 25;   // commit to push
   const uint16_t CHASE_CM  = 60;   // steer toward opponent
-  const uint16_t LOST_CM   = 200;  // treat larger as "nothing"
+  const uint16_t LOST_CM   = 60;  // treat larger as "nothing"
   const uint8_t  SPEED_ATTACK = 220;
   const uint8_t  SPEED_CHASE  = 170;
   const uint8_t  SPEED_SEARCH = 140;
 
-  // Servo scan angles (L, C, R or similar)
+  // Servo scan angles
   const uint8_t ANG_LEFT   = 150;
   const uint8_t ANG_CENTER = 80;
   const uint8_t ANG_RIGHT  = 20;
 
-  // --- Persistent state ---
-  static uint16_t dist_cm = 0;
-
-  // scan_idx: 0=center, 1=right, 2=center, 3=left (keeps your original pattern but corrected)
-  static uint8_t scan_idx = 0;
-  static unsigned long servo_t0 = 0;
-  static unsigned long edge_t0  = 0;
-  static uint8_t edge_escape_state = 0; // 0=none, 1=backing, 2=turning
-
   if (Application_SmartRobotCarxxx0.Functional_Mode != Follow_mode)
   {
-    dist_cm = 0;
-    scan_idx = 0;
-    servo_t0 = 0;
-    edge_t0 = 0;
-    edge_escape_state = 0;
     return;
   }
- 
 
-  // --- Ring edge handling ---
-  // Your original variable name is confusing, but it is clearly used as a safety gate.
-  // For sumo, treat "false" as "unsafe / edge detected" and escape.
+  // Update all sensors (TrackingData_* and Car_LeaveTheGround are updated here)
+  ApplicationFunctionSet_SensorDataUpdate();
+
+  // Safety: stop if picked up
   if (Car_LeaveTheGround == false)
   {
-  ApplicationFunctionSet_SmartRobotCarMotionControl(stop_it, 0);
-  return;
+    ApplicationFunctionSet_SmartRobotCarMotionControl(stop_it, 0);
+    return;
   }
 
-
-  ApplicationFunctionSet_SensorDataUpdate();
-  AppITR20001.DeviceDriverSet_ITR20001_Test();
-
-
-  //2) ring edge: escape
-  if (Sumo_EdgeDetected())
+  //Ring edge escape (tape)
+  if (Sumo_EscapeFromTapeSmart())
   {
-    // Simple escape: reverse then turn (tune times/speeds)
-    static unsigned long t0 = 0;
-    static uint8_t phase = 0;
-
-    if (phase == 0) { phase = 1; t0 = millis(); }
-    if (phase == 1)
-    {
-      //ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 220);
-      if (millis() - t0 > 250) { phase = 2; t0 = millis(); }
-      return;
-    }
-    if (phase == 2)
-    {
-      ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 220);
-      if (millis() - t0 > 200) { phase = 0; }
-      return;
-    }
+    return;
   }
+  // AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Test();
+  int8_t dir = 0;
+  uint16_t best_cm = LOST_CM;
+  const bool opponent_seen = Sumo_ScanOpponentDirection_ServoControls(
+    CHASE_CM, LOST_CM,
+    ANG_LEFT, ANG_CENTER, ANG_RIGHT,
+    dir, best_cm
+  );
 
-  // --- Read opponent distance ---
-  AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&dist_cm /*out*/);
+  // //Attack decision based on best distance found during scan
+  const bool opponent_close = opponent_seen && (best_cm <= ATTACK_CM);
 
-  // Normalize weird readings
-  if (dist_cm == 0 || dist_cm > LOST_CM) dist_cm = LOST_CM;
-
-  const bool opponent_close = function_xxx(dist_cm, 1, ATTACK_CM);
-  const bool opponent_seen  = function_xxx(dist_cm, 1, CHASE_CM);
-
-  // --- Opponent logic ---
   if (opponent_close)
   {
-    // Attack: push hard
     ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_ATTACK);
     return;
   }
 
   if (opponent_seen)
   {
-    // Chase/steer based on where we are currently looking
-    if (scan_idx == 1)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
-    else if (scan_idx == 3)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
-    else                      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
+    if (dir > 0)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
+    else if (dir < 0)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
+    else                ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
     return;
   }
 
-  // --- Search mode: scan + rotate slowly ---
-  // Step servo every ~180ms and rotate to find opponent
-  if (millis() - servo_t0 > 180)
+  // // No opponent found: keep searching (robot should move while servo scans)
+  // ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_SEARCH);
+}
+
+
+bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
+{
+  // Tape thresholds (same as your tuned values)
+  const uint16_t TAPE_L = 735;
+  const uint16_t TAPE_M = 855;
+  const uint16_t TAPE_R = 815;
+
+  const bool tapeL = (uint16_t)TrackingData_L >= TAPE_L;
+  const bool tapeM = (uint16_t)TrackingData_M >= TAPE_M;
+  const bool tapeR = (uint16_t)TrackingData_R >= TAPE_R;
+
+  static uint8_t phase = 0;             // 0=idle, 1=back, 2=turn
+  static unsigned long t0 = 0;
+  static uint8_t turn_dir = 0;          // 0=left, 1=right
+  static bool flip = false;
+
+  const bool tape_now = tapeL || tapeM || tapeR;
+
+  if (phase == 0)
+  {
+    if (!tape_now) return false;
+
+    // Decide direction once per trigger
+    if (tapeL && !tapeR) turn_dir = 1;         // tape left -> turn right
+    else if (tapeR && !tapeL) turn_dir = 0;    // tape right -> turn left
+    else { flip = !flip; turn_dir = flip ? 0 : 1; }
+
+    phase = 1;
+    t0 = millis();
+  }
+
+  if (phase == 1)
+  {
+    const unsigned long back_ms = tapeM ? 260 : 180;
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 255);
+
+    if (millis() - t0 >= back_ms)
+    {
+      phase = 2;
+      t0 = millis();
+    }
+    return true;
+  }
+
+  // phase == 2
+  ApplicationFunctionSet_SmartRobotCarMotionControl(turn_dir ? Right : Left, 255);
+
+  if (millis() - t0 >= 400)
+  {
+    phase = 0;
+  }
+  return true;
+}
+
+
+
+static inline uint8_t deg_to_step_10(uint8_t deg)
+{
+  // maps degrees to 10-degree steps expected by DeviceDriverSet_Servo_controls
+  // e.g. 80deg -> 8, 150deg -> 15, 20deg -> 2
+  uint8_t step = (deg + 5) / 10; // round to nearest
+  if (step < 1) step = 1;
+  if (step > 17) step = 17;
+  return step;
+}
+
+static bool Sumo_ScanOpponentDirection_ServoControls(
+  uint16_t chase_cm,
+  uint16_t lost_cm,
+  uint8_t ang_left_deg,
+  uint8_t ang_center_deg,
+  uint8_t ang_right_deg,
+  int8_t &dir_out,
+  uint16_t &best_cm_out
+)
+{
+  const uint8_t SERVO_ULTRASONIC = 1; // 1=Servo_z, 2=Servo_y
+
+  static uint8_t scan_idx = 0;               // 0=center, 1=right, 2=center, 3=left
+  static unsigned long servo_t0 = 0;
+
+  static uint16_t d_center = 999;
+  static uint16_t d_right  = 999;
+  static uint16_t d_left   = 999;
+
+  const unsigned long STEP_MS = 220; // must be >= your servo delay (500ms) if delay_xxx blocks
+
+  // Step servo
+  if (millis() - servo_t0 >= STEP_MS)
   {
     servo_t0 = millis();
     scan_idx = (scan_idx + 1) & 0x03;
 
-    if (scan_idx == 0 || scan_idx == 2) AppServo.DeviceDriverSet_Servo_control(ANG_CENTER);
-    else if (scan_idx == 1)             AppServo.DeviceDriverSet_Servo_control(ANG_RIGHT);
-    else                                AppServo.DeviceDriverSet_Servo_control(ANG_LEFT);
+    uint8_t target_deg =
+      (scan_idx == 1) ? ang_right_deg :
+      (scan_idx == 3) ? ang_left_deg  :
+                        ang_center_deg;
+
+    const uint8_t step10 = deg_to_step_10(target_deg);
+    AppServo.DeviceDriverSet_Servo_controls(SERVO_ULTRASONIC, step10);
   }
 
-  // Rotate while searching (pick a direction; you can alternate if you want)
-  ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_SEARCH);
+  // Sample ultrasonic
+  uint16_t cm = 0;
+  AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&cm /*out*/);
+  if (cm == 0 || cm > lost_cm) cm = lost_cm;
+
+  if (scan_idx == 1)        d_right = cm;
+  else if (scan_idx == 3)   d_left  = cm;
+  else                      d_center = cm;
+
+  // Choose best direction by minimum distance
+  uint16_t best = d_center;
+  int8_t best_dir = 0;
+  if (d_right < best) { best = d_right; best_dir = +1; }
+  if (d_left  < best) { best = d_left;  best_dir = -1; }
+
+  best_cm_out = best;
+  dir_out = best_dir;
+
+  return (best <= chase_cm);
 }
-
-
-
-// ---- 2) Sumo edge detector: detects the black boundary line of the ring ----
-// Ring surface (white/light) reads low (~250), black boundary reads high (~750-870).
-// Returns true when any sensor crosses onto the black edge.
-bool ApplicationFunctionSet::Sumo_EdgeDetected(void)
-{
-  // Shared hysteresis thresholds for all sensors:
-  // ENTER_BLACK: sensor must rise above this to be considered on the black edge
-  // EXIT_BLACK:  sensor must drop below this to be considered back on the ring
-  const int ENTER_BLACK = 850;
-  const int EXIT_BLACK  = 250;
-
-  static bool on_black_l = false;
-  static bool on_black_m = false;
-  static bool on_black_r = false;
-  static uint8_t edge_confirm = 0;
-
-  auto update_state = [](uint16_t value, int enter_thr, int exit_thr, bool prev) -> bool
-  {
-    if (prev) return (value > exit_thr);    // stay black until reading drops clearly low
-    return (value >= enter_thr);            // enter black only when reading goes clearly high
-  };
-
-  on_black_l = update_state(TrackingData_L, ENTER_BLACK, EXIT_BLACK, on_black_l);
-  on_black_m = update_state(TrackingData_M, ENTER_BLACK, EXIT_BLACK, on_black_m);
-  on_black_r = update_state(TrackingData_R, ENTER_BLACK, EXIT_BLACK, on_black_r);
-
-  const bool edge_now = on_black_l || on_black_m || on_black_r;
-
-  // 2-cycle debounce
-  if (edge_now)
-  {
-    if (edge_confirm < 2) edge_confirm++;
-  }
-  else
-  {
-    edge_confirm = 0;
-  }
-
-  return (edge_confirm >= 2);
-}
-
 
 
 // void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)

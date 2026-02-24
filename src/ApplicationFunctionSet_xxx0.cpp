@@ -100,6 +100,7 @@ Application_xxx Application_SmartRobotCarxxx0;
 bool ApplicationFunctionSet_SmartRobotCarLeaveTheGround(void);
 void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint8_t UpperLimit);
 void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotionControl direction, uint8_t is_speed);
+static bool Sumo_ScanOpponentDirection_ServoControls(uint16_t chase_cm, uint16_t lost_cm, uint8_t ang_left_deg, uint8_t ang_center_deg, uint8_t ang_right_deg, int8_t &dir_out, uint16_t &best_cm_out);
 
 void ApplicationFunctionSet::ApplicationFunctionSet_Init(void)
 {
@@ -222,7 +223,7 @@ static void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotio
     break;
   case Follow_mode:
     Kp = 2;
-    UpperLimit = 180;
+    UpperLimit = 400;
     break;
   case CMD_CarControl_TimeLimit:
     Kp = 2;
@@ -764,33 +765,29 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Obstacle(void)
 /*
   Following mode：
 */
+// Adapted scan helper to use DeviceDriverSet_Servo_controls(Servo, Position_angle)
+// Your servo driver expects "Position_angle" in *steps* (1..17) and writes 10*step degrees.
+// So we pass steps, not degrees.
+//
+// Assumption: your ultrasonic is on Servo_z => Servo channel 1.
+// If it's on Servo_y instead, change SERVO_ULTRASONIC from 1 -> 2.
 void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 {
   // --- Tunables ---
   const uint16_t ATTACK_CM = 25;   // commit to push
   const uint16_t CHASE_CM  = 60;   // steer toward opponent
-  const uint16_t LOST_CM   = 200;  // treat larger as "nothing"
+  const uint16_t LOST_CM   = 60;  // treat larger as "nothing"
   const uint8_t  SPEED_ATTACK = 220;
   const uint8_t  SPEED_CHASE  = 170;
   const uint8_t  SPEED_SEARCH = 140;
 
-  // Servo scan angles (L, C, R or similar)
+  // Servo scan angles
   const uint8_t ANG_LEFT   = 150;
   const uint8_t ANG_CENTER = 80;
   const uint8_t ANG_RIGHT  = 20;
 
-  // --- Persistent state ---
-  static uint16_t dist_cm = 0;
-
-  // scan_idx: 0=center, 1=right, 2=center, 3=left
-  static uint8_t scan_idx = 0;
-  static unsigned long servo_t0 = 0;
-
   if (Application_SmartRobotCarxxx0.Functional_Mode != Follow_mode)
   {
-    dist_cm = 0;
-    scan_idx = 0;
-    servo_t0 = 0;
     return;
   }
 
@@ -804,25 +801,23 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
     return;
   }
 
-  // Optional debug (comment out once tuned)
-  // AppITR20001.DeviceDriverSet_ITR20001_Test();
-
-  // Smart ring edge escape: turn away from the sensor that saw tape
+  //Ring edge escape (tape)
   if (Sumo_EscapeFromTapeSmart())
   {
-    return; // escape handled
+    return;
   }
+  // AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Test();
+  int8_t dir = 0;
+  uint16_t best_cm = LOST_CM;
+  const bool opponent_seen = Sumo_ScanOpponentDirection_ServoControls(
+    CHASE_CM, LOST_CM,
+    ANG_LEFT, ANG_CENTER, ANG_RIGHT,
+    dir, best_cm
+  );
 
-  // --- Read opponent distance ---
-  AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&dist_cm /*out*/);
+  // //Attack decision based on best distance found during scan
+  const bool opponent_close = opponent_seen && (best_cm <= ATTACK_CM);
 
-  // Normalize weird readings
-  if (dist_cm == 0 || dist_cm > LOST_CM) dist_cm = LOST_CM;
-
-  const bool opponent_close = function_xxx(dist_cm, 1, ATTACK_CM);
-  const bool opponent_seen  = function_xxx(dist_cm, 1, CHASE_CM);
-
-  // --- Opponent logic ---
   if (opponent_close)
   {
     ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_ATTACK);
@@ -831,30 +826,20 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
   if (opponent_seen)
   {
-    if (scan_idx == 1)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
-    else if (scan_idx == 3)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
-    else                      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
+    if (dir > 0)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
+    else if (dir < 0)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
+    else                ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
     return;
   }
 
-  // --- Search mode: scan + rotate slowly ---
-  if (millis() - servo_t0 > 180)
-  {
-    servo_t0 = millis();
-    scan_idx = (scan_idx + 1) & 0x03;
-
-    if (scan_idx == 0 || scan_idx == 2) AppServo.DeviceDriverSet_Servo_control(ANG_CENTER);
-    else if (scan_idx == 1)             AppServo.DeviceDriverSet_Servo_control(ANG_RIGHT);
-    else                                AppServo.DeviceDriverSet_Servo_control(ANG_LEFT);
-  }
-
-  ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_SEARCH);
+  // // No opponent found: keep searching (robot should move while servo scans)
+  // ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_SEARCH);
 }
 
 
 bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
 {
-  // Tape thresholds (from your logs)
+  // Tape thresholds (same as your tuned values)
   const uint16_t TAPE_L = 735;
   const uint16_t TAPE_M = 855;
   const uint16_t TAPE_R = 815;
@@ -863,70 +848,116 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
   const bool tapeM = (uint16_t)TrackingData_M >= TAPE_M;
   const bool tapeR = (uint16_t)TrackingData_R >= TAPE_R;
 
-  if (!(tapeL || tapeM || tapeR)) return false;
+  static uint8_t phase = 0;             // 0=idle, 1=back, 2=turn
+  static unsigned long t0 = 0;
+  static uint8_t turn_dir = 0;          // 0=left, 1=right
+  static bool flip = false;
 
-  const uint16_t back_ms = tapeM ? 180 : 120;
+  const bool tape_now = tapeL || tapeM || tapeR;
 
-  ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 255);
-  delay(back_ms);
+  if (phase == 0)
+  {
+    if (!tape_now) return false;
 
-  if (tapeL && !tapeR)
-  {
-    ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 255); // turn away from left tape
-    delay(110);
-  }
-  else if (tapeR && !tapeL)
-  {
-    ApplicationFunctionSet_SmartRobotCarMotionControl(Left, 255);  // turn away from right tape
-    delay(110);
-  }
-  else
-  {
-    static bool flip = false;
-    flip = !flip;
-    ApplicationFunctionSet_SmartRobotCarMotionControl(flip ? Left : Right, 255);
-    delay(110);
+    // Decide direction once per trigger
+    if (tapeL && !tapeR) turn_dir = 1;         // tape left -> turn right
+    else if (tapeR && !tapeL) turn_dir = 0;    // tape right -> turn left
+    else { flip = !flip; turn_dir = flip ? 0 : 1; }
+
+    phase = 1;
+    t0 = millis();
   }
 
+  if (phase == 1)
+  {
+    const unsigned long back_ms = tapeM ? 260 : 180;
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 255);
+
+    if (millis() - t0 >= back_ms)
+    {
+      phase = 2;
+      t0 = millis();
+    }
+    return true;
+  }
+
+  // phase == 2
+  ApplicationFunctionSet_SmartRobotCarMotionControl(turn_dir ? Right : Left, 255);
+
+  if (millis() - t0 >= 400)
+  {
+    phase = 0;
+  }
   return true;
 }
 
 
-// ---- 2) Sumo edge detector: uses the same thresholds as line tracking ----
-bool ApplicationFunctionSet::Sumo_EdgeDetected(void)
+
+static inline uint8_t deg_to_step_10(uint8_t deg)
 {
-  // BLACK TAPE border detection (ignore white).
-  // Tape logs:
-  //   L: 744..768
-  //   M: 862..875
-  //   R: 823..840
-  // We detect "edge" when ANY sensor is on the tape (high readings).
+  // maps degrees to 10-degree steps expected by DeviceDriverSet_Servo_controls
+  // e.g. 80deg -> 8, 150deg -> 15, 20deg -> 2
+  uint8_t step = (deg + 5) / 10; // round to nearest
+  if (step < 1) step = 1;
+  if (step > 17) step = 17;
+  return step;
+}
 
-  const uint16_t ENTER_TAPE_L = 735;
-  const uint16_t ENTER_TAPE_M = 855;
-  const uint16_t ENTER_TAPE_R = 815;
+static bool Sumo_ScanOpponentDirection_ServoControls(
+  uint16_t chase_cm,
+  uint16_t lost_cm,
+  uint8_t ang_left_deg,
+  uint8_t ang_center_deg,
+  uint8_t ang_right_deg,
+  int8_t &dir_out,
+  uint16_t &best_cm_out
+)
+{
+  const uint8_t SERVO_ULTRASONIC = 1; // 1=Servo_z, 2=Servo_y
 
-  const uint16_t EXIT_TAPE_L  = 600;
-  const uint16_t EXIT_TAPE_M  = 700;
-  const uint16_t EXIT_TAPE_R  = 700;
+  static uint8_t scan_idx = 0;               // 0=center, 1=right, 2=center, 3=left
+  static unsigned long servo_t0 = 0;
 
-  static bool on_tape_l = false;
-  static bool on_tape_m = false;
-  static bool on_tape_r = false;
+  static uint16_t d_center = 999;
+  static uint16_t d_right  = 999;
+  static uint16_t d_left   = 999;
 
-  auto update_state = [](uint16_t value, uint16_t enter_thr, uint16_t exit_thr, bool prev) -> bool
+  const unsigned long STEP_MS = 220; // must be >= your servo delay (500ms) if delay_xxx blocks
+
+  // Step servo
+  if (millis() - servo_t0 >= STEP_MS)
   {
-    if (prev) return (value >= exit_thr);  // stay on tape until clearly lower
-    return (value >= enter_thr);           // enter tape only when clearly higher
-  };
+    servo_t0 = millis();
+    scan_idx = (scan_idx + 1) & 0x03;
 
-  on_tape_l = update_state((uint16_t)TrackingData_L, ENTER_TAPE_L, EXIT_TAPE_L, on_tape_l);
-  on_tape_m = update_state((uint16_t)TrackingData_M, ENTER_TAPE_M, EXIT_TAPE_M, on_tape_m);
-  on_tape_r = update_state((uint16_t)TrackingData_R, ENTER_TAPE_R, EXIT_TAPE_R, on_tape_r);
+    uint8_t target_deg =
+      (scan_idx == 1) ? ang_right_deg :
+      (scan_idx == 3) ? ang_left_deg  :
+                        ang_center_deg;
 
-  // 1-cycle detection (no multi-cycle debounce)
-  return (on_tape_l || on_tape_m || on_tape_r);
+    const uint8_t step10 = deg_to_step_10(target_deg);
+    AppServo.DeviceDriverSet_Servo_controls(SERVO_ULTRASONIC, step10);
+  }
 
+  // Sample ultrasonic
+  uint16_t cm = 0;
+  AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&cm /*out*/);
+  if (cm == 0 || cm > lost_cm) cm = lost_cm;
+
+  if (scan_idx == 1)        d_right = cm;
+  else if (scan_idx == 3)   d_left  = cm;
+  else                      d_center = cm;
+
+  // Choose best direction by minimum distance
+  uint16_t best = d_center;
+  int8_t best_dir = 0;
+  if (d_right < best) { best = d_right; best_dir = +1; }
+  if (d_left  < best) { best = d_left;  best_dir = -1; }
+
+  best_cm_out = best;
+  dir_out = best_dir;
+
+  return (best <= chase_cm);
 }
 
 

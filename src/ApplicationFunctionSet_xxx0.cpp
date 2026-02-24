@@ -782,57 +782,35 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   // --- Persistent state ---
   static uint16_t dist_cm = 0;
 
-  // scan_idx: 0=center, 1=right, 2=center, 3=left (keeps your original pattern but corrected)
+  // scan_idx: 0=center, 1=right, 2=center, 3=left
   static uint8_t scan_idx = 0;
   static unsigned long servo_t0 = 0;
-  static unsigned long edge_t0  = 0;
-  static uint8_t edge_escape_state = 0; // 0=none, 1=backing, 2=turning
 
   if (Application_SmartRobotCarxxx0.Functional_Mode != Follow_mode)
   {
     dist_cm = 0;
     scan_idx = 0;
     servo_t0 = 0;
-    edge_t0 = 0;
-    edge_escape_state = 0;
     return;
   }
- 
 
-  // --- Ring edge handling ---
-  // Your original variable name is confusing, but it is clearly used as a safety gate.
-  // For sumo, treat "false" as "unsafe / edge detected" and escape.
+  // Update all sensors (TrackingData_* and Car_LeaveTheGround are updated here)
+  ApplicationFunctionSet_SensorDataUpdate();
+
+  // Safety: stop if picked up
   if (Car_LeaveTheGround == false)
   {
-  ApplicationFunctionSet_SmartRobotCarMotionControl(stop_it, 0);
-  return;
+    ApplicationFunctionSet_SmartRobotCarMotionControl(stop_it, 0);
+    return;
   }
 
+  // Optional debug (comment out once tuned)
+  // AppITR20001.DeviceDriverSet_ITR20001_Test();
 
-  ApplicationFunctionSet_SensorDataUpdate();
-  AppITR20001.DeviceDriverSet_ITR20001_Test();
-
-
-  //2) ring edge: escape
-  if (Sumo_EdgeDetected())
+  // Smart ring edge escape: turn away from the sensor that saw tape
+  if (Sumo_EscapeFromTapeSmart())
   {
-    // Simple escape: reverse then turn (tune times/speeds)
-    static unsigned long t0 = 0;
-    static uint8_t phase = 0;
-
-    if (phase == 0) { phase = 1; t0 = millis(); }
-    if (phase == 1)
-    {
-      //ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 220);
-      if (millis() - t0 > 250) { phase = 2; t0 = millis(); }
-      return;
-    }
-    if (phase == 2)
-    {
-      ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 220);
-      if (millis() - t0 > 200) { phase = 0; }
-      return;
-    }
+    return; // escape handled
   }
 
   // --- Read opponent distance ---
@@ -847,14 +825,12 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   // --- Opponent logic ---
   if (opponent_close)
   {
-    // Attack: push hard
     ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_ATTACK);
     return;
   }
 
   if (opponent_seen)
   {
-    // Chase/steer based on where we are currently looking
     if (scan_idx == 1)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
     else if (scan_idx == 3)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
     else                      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
@@ -862,7 +838,6 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   }
 
   // --- Search mode: scan + rotate slowly ---
-  // Step servo every ~180ms and rotate to find opponent
   if (millis() - servo_t0 > 180)
   {
     servo_t0 = millis();
@@ -873,68 +848,86 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
     else                                AppServo.DeviceDriverSet_Servo_control(ANG_LEFT);
   }
 
-  // Rotate while searching (pick a direction; you can alternate if you want)
   ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_SEARCH);
 }
 
+
+bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
+{
+  // Tape thresholds (from your logs)
+  const uint16_t TAPE_L = 735;
+  const uint16_t TAPE_M = 855;
+  const uint16_t TAPE_R = 815;
+
+  const bool tapeL = (uint16_t)TrackingData_L >= TAPE_L;
+  const bool tapeM = (uint16_t)TrackingData_M >= TAPE_M;
+  const bool tapeR = (uint16_t)TrackingData_R >= TAPE_R;
+
+  if (!(tapeL || tapeM || tapeR)) return false;
+
+  const uint16_t back_ms = tapeM ? 180 : 120;
+
+  ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 255);
+  delay(back_ms);
+
+  if (tapeL && !tapeR)
+  {
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 255); // turn away from left tape
+    delay(110);
+  }
+  else if (tapeR && !tapeL)
+  {
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Left, 255);  // turn away from right tape
+    delay(110);
+  }
+  else
+  {
+    static bool flip = false;
+    flip = !flip;
+    ApplicationFunctionSet_SmartRobotCarMotionControl(flip ? Left : Right, 255);
+    delay(110);
+  }
+
+  return true;
+}
 
 
 // ---- 2) Sumo edge detector: uses the same thresholds as line tracking ----
 bool ApplicationFunctionSet::Sumo_EdgeDetected(void)
 {
-  // Per-sensor thresholds from your logs:
-  // L: black ~185, white ~55-63
-  // M: black ~430-470, white ~318-340
-  // R: black ~322-360, white ~190-221
-  // const uint16_t ENTER_BLACK_L = 123;
-  // const uint16_t ENTER_BLACK_M = 385;
-  // const uint16_t ENTER_BLACK_R = 272;
+  // BLACK TAPE border detection (ignore white).
+  // Tape logs:
+  //   L: 744..768
+  //   M: 862..875
+  //   R: 823..840
+  // We detect "edge" when ANY sensor is on the tape (high readings).
 
-  // // Hysteresis (lower exit threshold avoids chatter near boundary)
-  // const uint16_t EXIT_BLACK_L = 108;
-  // const uint16_t EXIT_BLACK_M = 365;
-  // const uint16_t EXIT_BLACK_R = 250;
+  const uint16_t ENTER_TAPE_L = 735;
+  const uint16_t ENTER_TAPE_M = 855;
+  const uint16_t ENTER_TAPE_R = 815;
 
-  // Enter black
-  const int ENTER_BLACK_L = 72;
-  const int ENTER_BLACK_M = 385;
-  const int ENTER_BLACK_R = 265;
+  const uint16_t EXIT_TAPE_L  = 600;
+  const uint16_t EXIT_TAPE_M  = 700;
+  const uint16_t EXIT_TAPE_R  = 700;
 
-  // Exit black (must drop lower before considered white/edge)
-  const int EXIT_BLACK_L  = 60;
-  const int EXIT_BLACK_M  = 325;
-  const int EXIT_BLACK_R  = 245;
-
-  static bool on_black_l = true;
-  static bool on_black_m = true;
-  static bool on_black_r = true;
-  static uint8_t edge_confirm = 0;
+  static bool on_tape_l = false;
+  static bool on_tape_m = false;
+  static bool on_tape_r = false;
 
   auto update_state = [](uint16_t value, uint16_t enter_thr, uint16_t exit_thr, bool prev) -> bool
   {
-    if (prev) return (value >= exit_thr);   // stay black until we go clearly low
-    return (value >= enter_thr);            // re-enter black only when clearly high
+    if (prev) return (value >= exit_thr);  // stay on tape until clearly lower
+    return (value >= enter_thr);           // enter tape only when clearly higher
   };
 
-  on_black_l = update_state(TrackingData_L, ENTER_BLACK_L, EXIT_BLACK_L, on_black_l);
-  on_black_m = update_state(TrackingData_M, ENTER_BLACK_M, EXIT_BLACK_M, on_black_m);
-  on_black_r = update_state(TrackingData_R, ENTER_BLACK_R, EXIT_BLACK_R, on_black_r);
+  on_tape_l = update_state((uint16_t)TrackingData_L, ENTER_TAPE_L, EXIT_TAPE_L, on_tape_l);
+  on_tape_m = update_state((uint16_t)TrackingData_M, ENTER_TAPE_M, EXIT_TAPE_M, on_tape_m);
+  on_tape_r = update_state((uint16_t)TrackingData_R, ENTER_TAPE_R, EXIT_TAPE_R, on_tape_r);
 
-  const bool edge_now = (!on_black_l) || (!on_black_m) || (!on_black_r);
+  // 1-cycle detection (no multi-cycle debounce)
+  return (on_tape_l || on_tape_m || on_tape_r);
 
-  // 2-cycle debounce
-  if (edge_now)
-  {
-    if (edge_confirm < 2) edge_confirm++;
-  }
-  else
-  {
-    edge_confirm = 0;
-  }
-
-  return (edge_confirm >= 2);
 }
-
 
 
 // void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)

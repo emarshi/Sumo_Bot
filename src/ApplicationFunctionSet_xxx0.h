@@ -72,6 +72,7 @@ private:
   boolean TrackingDetectionStatus_L = false;
   void UpdateTrackingSensors(void);
   bool Sumo_EdgeDetected(void);
+  bool Sumo_EscapeFromTapeSmart(void);
 
 public:
   boolean Car_LeaveTheGround = true;

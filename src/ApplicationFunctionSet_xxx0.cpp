@@ -772,6 +772,11 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Obstacle(void)
 //
 // Assumption: your ultrasonic is on Servo_z => Servo channel 1.
 // If it's on Servo_y instead, change SERVO_ULTRASONIC from 1 -> 2.
+// Control priority in this mode:
+// 1) Safety (picked up) -> stop
+// 2) Edge escape -> immediate override
+// 3) Opponent engage/attack
+// 4) Search pattern when no target
 void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 {
   // --- Tunables ---
@@ -782,7 +787,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   const uint16_t LOST_CM = 150;      // treat larger as "nothing"
   const uint8_t SPEED_ATTACK = 255;   // max PWM
   const uint8_t SPEED_CHASE = 200;
-  const uint8_t SPEED_SEARCH = 120;
+  const uint8_t SPEED_SEARCH = 20;
   const uint8_t ATTACK_BIAS_PCT = 88; // 88%/100% keeps steering with high push power
 
   // Servo scan angles
@@ -792,11 +797,12 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
   const unsigned long LOST_MEMORY_MS = 550;
   const unsigned long SEARCH_TURN_MS = 520;
-  const unsigned long SEARCH_DRIVE_MS = 180;
+  const unsigned long SEARCH_DRIVE_MS = 160;
   const unsigned long TARGET_SEEN_HOLD_MS = 700; // keep track lock through brief dropouts
   const unsigned long ATTACK_HOLD_MS = 360; // keep pushing through brief sensor dropouts
   const unsigned long DEBUG_PERIOD_MS = 300;
 
+  // Persistent state for non-blocking behavior across loop calls.
   static unsigned long last_seen_ms = 0;
   static unsigned long search_t0 = 0;
   static bool search_turn_right = true;
@@ -808,12 +814,14 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   static int8_t last_dir = 0;
   static unsigned long debug_t0 = 0;
 
+  // Reset local follow-mode state when leaving Follow_mode.
   if (Application_SmartRobotCarxxx0.Functional_Mode != Follow_mode)
   {
     was_follow_mode = false;
     return;
   }
 
+  // One-time init when Follow_mode is first entered.
   if (!was_follow_mode)
   {
     was_follow_mode = true;
@@ -828,7 +836,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
     debug_t0 = 0;
   }
 
-  // Update all sensors (TrackingData_* and Car_LeaveTheGround are updated here)
+  // Refresh sensor cache used by this cycle.
   ApplicationFunctionSet_SensorDataUpdate();
 
   // Safety: stop if picked up
@@ -844,6 +852,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
     return;
   }
 
+  // Update directional estimate and nearest distance from servo+ultrasonic scan.
   int8_t dir = 0;
   uint16_t best_cm = LOST_CM;
   (void)Sumo_ScanOpponentDirection_ServoControls(
@@ -855,14 +864,17 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   const unsigned long now = millis();
   if (dir != 0)
   {
+    // Keep last non-zero direction so attack can continue briefly through noisy reads.
     last_dir = dir;
   }
 
+  // Raw thresholds from the current frame.
   const bool opponent_track_raw = (best_cm <= CHASE_CM);
   const bool opponent_close_raw = (best_cm <= ATTACK_CM);
 
   if (opponent_track_raw)
   {
+    // Extend target lock window while target is within tracking range.
     seen_hold_until_ms = now + TARGET_SEEN_HOLD_MS;
     last_seen_ms = now;
   }
@@ -873,6 +885,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
   if (opponent_close_raw)
   {
+    // Extend attack hold window while target is within attack range.
     attack_hold_until_ms = now + ATTACK_HOLD_MS;
     last_seen_ms = now;
   }
@@ -920,6 +933,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
   if (opponent_close)
   {
+    // Apply a high-power forward push with a small wheel bias for steering.
     int8_t attack_dir = (dir != 0) ? dir : last_dir;
     const uint8_t bias_speed = (uint16_t)SPEED_ATTACK * ATTACK_BIAS_PCT / 100;
     if (attack_dir > 0)
@@ -942,6 +956,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 
   if (opponent_seen)
   {
+    // Target tracked but not in close-attack range: steer to align.
     if (dir > 0)
       ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
     else if (dir < 0)
@@ -961,6 +976,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   // No opponent: active search pattern while servo keeps scanning.
   if (search_phase == 0)
   {
+    // Phase 0: in-place sweep turn.
     ApplicationFunctionSet_SmartRobotCarMotionControl(search_turn_right ? Right : Left, SPEED_SEARCH);
     if (now - search_t0 >= SEARCH_TURN_MS)
     {
@@ -970,6 +986,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   }
   else
   {
+    // Phase 1: short forward burst between sweeps.
     ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_SEARCH);
     if (now - search_t0 >= SEARCH_DRIVE_MS)
     {
@@ -997,6 +1014,7 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
   static uint8_t turn_dir = 0;          // 0=left, 1=right
   static bool flip = false;
 
+  // Any tape sensor high means "edge risk now".
   const bool tape_now = tapeL || tapeM || tapeR;
 
   if (phase == 0)
@@ -1014,7 +1032,8 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
 
   if (phase == 1)
   {
-    const unsigned long back_ms = tapeM ? 260 : 180;
+    // Back away first to create clearance from the edge.
+    const unsigned long back_ms = tapeM ? 400 : 300;
     ApplicationFunctionSet_SmartRobotCarMotionControl(Backward, 255);
 
     if (millis() - t0 >= back_ms)
@@ -1026,9 +1045,10 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
   }
 
   // phase == 2
+  // Then turn away to re-enter the arena before returning control to follow mode.
   ApplicationFunctionSet_SmartRobotCarMotionControl(turn_dir ? Right : Left, 255);
 
-  if (millis() - t0 >= rand() % 301 + 300) // turn for 300..600ms
+  if (millis() - t0 >= rand() % 141 + 250) // turn for 400..540ms rand() % 141 + 220, (original rand() % 301 + 300)
   {
     phase = 0;
   }
@@ -1039,7 +1059,7 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
 
 static inline uint8_t deg_to_step_10(uint8_t deg)
 {
-  // maps degrees to 10-degree steps expected by DeviceDriverSet_Servo_controls
+  // Maps degrees to 10-degree steps expected by DeviceDriverSet_Servo_controls.
   // e.g. 80deg -> 8, 150deg -> 15, 20deg -> 2
   uint8_t step = (deg + 5) / 10; // round to nearest
   if (step < 1) step = 1;
@@ -1057,8 +1077,11 @@ static bool Sumo_ScanOpponentDirection_ServoControls(
   uint16_t &best_cm_out
 )
 {
+  // Returns the nearest observed distance among left/center/right samples and
+  // a direction hint: -1 left, 0 center, +1 right.
   const uint8_t SERVO_ULTRASONIC = 1; // 1=Servo_z, 2=Servo_y
 
+  // Non-blocking scan sequence: center -> right -> center -> left.
   static uint8_t scan_idx = 0;               // 0=center, 1=right, 2=center, 3=left
   static unsigned long servo_t0 = 0;
 
@@ -1069,7 +1092,7 @@ static bool Sumo_ScanOpponentDirection_ServoControls(
   const unsigned long STEP_MS = 180;
   const unsigned long SERVO_SETTLE_MS = 60;
 
-  // Step servo
+  // Step servo position on schedule.
   if (millis() - servo_t0 >= STEP_MS)
   {
     servo_t0 = millis();
@@ -1096,7 +1119,7 @@ static bool Sumo_ScanOpponentDirection_ServoControls(
     else                      d_center = cm;
   }
 
-  // Choose best direction by minimum distance
+  // Choose direction based on the nearest sampled distance.
   uint16_t best = d_center;
   int8_t best_dir = 0;
   if (d_right < best) { best = d_right; best_dir = +1; }

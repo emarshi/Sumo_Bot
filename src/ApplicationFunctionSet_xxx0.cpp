@@ -98,7 +98,7 @@ struct Application_xxx
 Application_xxx Application_SmartRobotCarxxx0;
 
 bool ApplicationFunctionSet_SmartRobotCarLeaveTheGround(void);
-void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint8_t UpperLimit);
+void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint16_t UpperLimit);
 void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotionControl direction, uint8_t is_speed);
 static bool Sumo_ScanOpponentDirection_ServoControls(uint16_t chase_cm, uint16_t lost_cm, uint8_t ang_left_deg, uint8_t ang_center_deg, uint8_t ang_right_deg, int8_t &dir_out, uint16_t &best_cm_out);
 
@@ -149,7 +149,7 @@ static bool ApplicationFunctionSet_SmartRobotCarLeaveTheGround(void)
   Kp：Position error proportional constant（The feedback of improving location resuming status，will be modified according to different mode），improve damping control.
   UpperLimit：Maximum output upper limit control
 */
-static void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint8_t UpperLimit)
+static void ApplicationFunctionSet_SmartRobotCarLinearMotionControl(SmartRobotCarMotionControl direction, uint8_t directionRecord, uint8_t speed, uint8_t Kp, uint16_t UpperLimit)
 {
   static float Yaw; //Yaw
   static float yaw_So = 0;
@@ -207,7 +207,8 @@ static void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotio
 {
   ApplicationFunctionSet Application_FunctionSet;
   static uint8_t directionRecord = 0;
-  uint8_t Kp, UpperLimit;
+  uint8_t Kp;
+  uint16_t UpperLimit;
   uint8_t speed = is_speed;
   //Control mode that requires straight line movement adjustment（Car will has movement offset easily in the below mode，the movement cannot achieve the effect of a relatively straight direction
   //so it needs to add control adjustment）
@@ -223,7 +224,7 @@ static void ApplicationFunctionSet_SmartRobotCarMotionControl(SmartRobotCarMotio
     break;
   case Follow_mode:
     Kp = 2;
-    UpperLimit = 400;
+    UpperLimit = 255; // 8-bit PWM max; avoid overflow/truncation
     break;
   case CMD_CarControl_TimeLimit:
     Kp = 2;
@@ -774,21 +775,57 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Obstacle(void)
 void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
 {
   // --- Tunables ---
-  const uint16_t ATTACK_CM = 25;   // commit to push
-  const uint16_t CHASE_CM  = 60;   // steer toward opponent
-  const uint16_t LOST_CM   = 60;  // treat larger as "nothing"
-  const uint8_t  SPEED_ATTACK = 220;
-  const uint8_t  SPEED_CHASE  = 170;
-  const uint8_t  SPEED_SEARCH = 140;
+  const uint16_t OPPONENT_ATTACK_CM = 60;             // strict attack threshold requested
+  const uint16_t OPPONENT_TRACK_CM = OPPONENT_ATTACK_CM + 6; // small jitter margin
+  const uint16_t ATTACK_CM = OPPONENT_ATTACK_CM;
+  const uint16_t CHASE_CM = OPPONENT_TRACK_CM;
+  const uint16_t LOST_CM = 150;      // treat larger as "nothing"
+  const uint8_t SPEED_ATTACK = 255;   // max PWM
+  const uint8_t SPEED_CHASE = 200;
+  const uint8_t SPEED_SEARCH = 120;
+  const uint8_t ATTACK_BIAS_PCT = 88; // 88%/100% keeps steering with high push power
 
   // Servo scan angles
-  const uint8_t ANG_LEFT   = 150;
+  const uint8_t ANG_LEFT = 150;
   const uint8_t ANG_CENTER = 80;
-  const uint8_t ANG_RIGHT  = 20;
+  const uint8_t ANG_RIGHT = 20;
+
+  const unsigned long LOST_MEMORY_MS = 550;
+  const unsigned long SEARCH_TURN_MS = 520;
+  const unsigned long SEARCH_DRIVE_MS = 180;
+  const unsigned long TARGET_SEEN_HOLD_MS = 700; // keep track lock through brief dropouts
+  const unsigned long ATTACK_HOLD_MS = 360; // keep pushing through brief sensor dropouts
+  const unsigned long DEBUG_PERIOD_MS = 300;
+
+  static unsigned long last_seen_ms = 0;
+  static unsigned long search_t0 = 0;
+  static bool search_turn_right = true;
+  static uint8_t search_phase = 0; // 0=turn, 1=forward
+  static bool was_follow_mode = false;
+  static bool debug_target_seen_prev = false;
+  static unsigned long seen_hold_until_ms = 0;
+  static unsigned long attack_hold_until_ms = 0;
+  static int8_t last_dir = 0;
+  static unsigned long debug_t0 = 0;
 
   if (Application_SmartRobotCarxxx0.Functional_Mode != Follow_mode)
   {
+    was_follow_mode = false;
     return;
+  }
+
+  if (!was_follow_mode)
+  {
+    was_follow_mode = true;
+    search_t0 = millis();
+    search_phase = 0;
+    search_turn_right = true;
+    last_seen_ms = 0;
+    debug_target_seen_prev = false;
+    seen_hold_until_ms = 0;
+    attack_hold_until_ms = 0;
+    last_dir = 0;
+    debug_t0 = 0;
   }
 
   // Update all sensors (TrackingData_* and Car_LeaveTheGround are updated here)
@@ -806,34 +843,141 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Follow(void)
   {
     return;
   }
-  // AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Test();
+
   int8_t dir = 0;
   uint16_t best_cm = LOST_CM;
-  const bool opponent_seen = Sumo_ScanOpponentDirection_ServoControls(
+  (void)Sumo_ScanOpponentDirection_ServoControls(
     CHASE_CM, LOST_CM,
     ANG_LEFT, ANG_CENTER, ANG_RIGHT,
     dir, best_cm
   );
 
-  // //Attack decision based on best distance found during scan
-  const bool opponent_close = opponent_seen && (best_cm <= ATTACK_CM);
+  const unsigned long now = millis();
+  if (dir != 0)
+  {
+    last_dir = dir;
+  }
+
+  const bool opponent_track_raw = (best_cm <= CHASE_CM);
+  const bool opponent_close_raw = (best_cm <= ATTACK_CM);
+
+  if (opponent_track_raw)
+  {
+    seen_hold_until_ms = now + TARGET_SEEN_HOLD_MS;
+    last_seen_ms = now;
+  }
+
+  const bool opponent_seen =
+    opponent_track_raw ||
+    (seen_hold_until_ms != 0 && now < seen_hold_until_ms);
+
+  if (opponent_close_raw)
+  {
+    attack_hold_until_ms = now + ATTACK_HOLD_MS;
+    last_seen_ms = now;
+  }
+
+  const bool opponent_close =
+    opponent_close_raw ||
+    (attack_hold_until_ms != 0 && now < attack_hold_until_ms);
+
+  // if (opponent_seen && !debug_target_seen_prev)
+  // {
+  //   Serial.print("SUMO target found: cm=");
+  //   Serial.print(best_cm);
+  //   Serial.print(" dir=");
+  //   if (dir > 0) Serial.println("RIGHT");
+  //   else if (dir < 0) Serial.println("LEFT");
+  //   else Serial.println("CENTER");
+  //   debug_target_seen_prev = true;
+  // }
+  // else if (!opponent_seen && debug_target_seen_prev)
+  // {
+  //   Serial.println("SUMO target lost, searching...");
+  //   debug_target_seen_prev = false;
+  // }
+
+  // if (now - debug_t0 >= DEBUG_PERIOD_MS)
+  // {
+  //   debug_t0 = now;
+  //   Serial.print("SUMO dbg rawTrack=");
+  //   Serial.print(opponent_track_raw ? 1 : 0);
+  //   Serial.print(" rawClose=");
+  //   Serial.print(opponent_close_raw ? 1 : 0);
+  //   Serial.print(" seen=");
+  //   Serial.print(opponent_seen ? 1 : 0);
+  //   Serial.print(" close=");
+  //   Serial.print(opponent_close ? 1 : 0);
+  //   Serial.print(" cm=");
+  //   Serial.print(best_cm);
+  //   Serial.print(" dir=");
+  //   Serial.print(dir);
+  //   Serial.print(" seenHoldMs=");
+  //   Serial.print((seen_hold_until_ms > now) ? (seen_hold_until_ms - now) : 0);
+  //   Serial.print(" atkHoldMs=");
+  //   Serial.println((attack_hold_until_ms > now) ? (attack_hold_until_ms - now) : 0);
+  // }
 
   if (opponent_close)
   {
-    ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_ATTACK);
+    int8_t attack_dir = (dir != 0) ? dir : last_dir;
+    const uint8_t bias_speed = (uint16_t)SPEED_ATTACK * ATTACK_BIAS_PCT / 100;
+    if (attack_dir > 0)
+      AppMotor.DeviceDriverSet_Motor_control(
+        /*direction_A*/ direction_just, /*speed_A*/ bias_speed,
+        /*direction_B*/ direction_just, /*speed_B*/ SPEED_ATTACK,
+        /*controlED*/ control_enable);
+    else if (attack_dir < 0)
+      AppMotor.DeviceDriverSet_Motor_control(
+        /*direction_A*/ direction_just, /*speed_A*/ SPEED_ATTACK,
+        /*direction_B*/ direction_just, /*speed_B*/ bias_speed,
+        /*controlED*/ control_enable);
+    else
+      AppMotor.DeviceDriverSet_Motor_control(
+        /*direction_A*/ direction_just, /*speed_A*/ SPEED_ATTACK,
+        /*direction_B*/ direction_just, /*speed_B*/ SPEED_ATTACK,
+        /*controlED*/ control_enable);
     return;
   }
 
   if (opponent_seen)
   {
-    if (dir > 0)        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
-    else if (dir < 0)   ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
-    else                ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
+    if (dir > 0)
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Right, SPEED_CHASE);
+    else if (dir < 0)
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Left, SPEED_CHASE);
+    else
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
     return;
   }
 
-  // // No opponent found: keep searching (robot should move while servo scans)
-  // ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_SEARCH);
+  // Recently lost target: continue moving forward to re-acquire quickly.
+  if (last_seen_ms != 0 && (now - last_seen_ms) <= LOST_MEMORY_MS)
+  {
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_CHASE);
+    return;
+  }
+
+  // No opponent: active search pattern while servo keeps scanning.
+  if (search_phase == 0)
+  {
+    ApplicationFunctionSet_SmartRobotCarMotionControl(search_turn_right ? Right : Left, SPEED_SEARCH);
+    if (now - search_t0 >= SEARCH_TURN_MS)
+    {
+      search_phase = 1;
+      search_t0 = now;
+    }
+  }
+  else
+  {
+    ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, SPEED_SEARCH);
+    if (now - search_t0 >= SEARCH_DRIVE_MS)
+    {
+      search_phase = 0;
+      search_turn_right = !search_turn_right;
+      search_t0 = now;
+    }
+  }
 }
 
 
@@ -884,7 +1028,7 @@ bool ApplicationFunctionSet::Sumo_EscapeFromTapeSmart(void)
   // phase == 2
   ApplicationFunctionSet_SmartRobotCarMotionControl(turn_dir ? Right : Left, 255);
 
-  if (millis() - t0 >= 400)
+  if (millis() - t0 >= rand() % 301 + 300) // turn for 300..600ms
   {
     phase = 0;
   }
@@ -922,7 +1066,8 @@ static bool Sumo_ScanOpponentDirection_ServoControls(
   static uint16_t d_right  = 999;
   static uint16_t d_left   = 999;
 
-  const unsigned long STEP_MS = 220; // must be >= your servo delay (500ms) if delay_xxx blocks
+  const unsigned long STEP_MS = 180;
+  const unsigned long SERVO_SETTLE_MS = 60;
 
   // Step servo
   if (millis() - servo_t0 >= STEP_MS)
@@ -936,17 +1081,20 @@ static bool Sumo_ScanOpponentDirection_ServoControls(
                         ang_center_deg;
 
     const uint8_t step10 = deg_to_step_10(target_deg);
-    AppServo.DeviceDriverSet_Servo_controls(SERVO_ULTRASONIC, step10);
+    AppServo.DeviceDriverSet_Servo_controls_NoWait(SERVO_ULTRASONIC, step10);
   }
 
-  // Sample ultrasonic
-  uint16_t cm = 0;
-  AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&cm /*out*/);
-  if (cm == 0 || cm > lost_cm) cm = lost_cm;
+  // Give servo/sensor a short settle window before sampling this angle.
+  if (millis() - servo_t0 >= SERVO_SETTLE_MS)
+  {
+    uint16_t cm = 0;
+    AppULTRASONIC.DeviceDriverSet_ULTRASONIC_Get(&cm /*out*/);
+    if (cm == 0 || cm > lost_cm) cm = lost_cm;
 
-  if (scan_idx == 1)        d_right = cm;
-  else if (scan_idx == 3)   d_left  = cm;
-  else                      d_center = cm;
+    if (scan_idx == 1)        d_right = cm;
+    else if (scan_idx == 3)   d_left  = cm;
+    else                      d_center = cm;
+  }
 
   // Choose best direction by minimum distance
   uint16_t best = d_center;

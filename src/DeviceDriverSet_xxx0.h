@@ -149,6 +149,7 @@ public:
 #endif
   void DeviceDriverSet_Servo_control(unsigned int Position_angle);
   void DeviceDriverSet_Servo_controls(uint8_t Servo, unsigned int Position_angle);
+  void DeviceDriverSet_Servo_controls_NoWait(uint8_t Servo, unsigned int Position_angle);
 
 private:
 #define PIN_Servo_z 10

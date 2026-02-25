@@ -300,7 +300,9 @@ void DeviceDriverSet_ULTRASONIC::DeviceDriverSet_ULTRASONIC_Get(uint16_t *ULTRAS
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-  tempda_x = ((unsigned int)pulseIn(ECHO_PIN, HIGH) / 58);
+  // Bound blocking time so control loop can keep servicing edge detection.
+  // 12000us is enough for ~200cm round trip; this code clamps to 150cm anyway.
+  tempda_x = ((unsigned int)pulseIn(ECHO_PIN, HIGH, 12000) / 58);
   // *ULTRASONIC_Get = tempda_x;
 
   if (tempda_x > 150)
@@ -436,6 +438,24 @@ void DeviceDriverSet_Servo::DeviceDriverSet_Servo_controls(uint8_t Servo, unsign
     delay_xxx(500);
   }
   myservo.detach();
+}
+
+void DeviceDriverSet_Servo::DeviceDriverSet_Servo_controls_NoWait(uint8_t Servo, unsigned int Position_angle)
+{
+  if (Servo == 1 || Servo == 3) //Servo_z
+  {
+    if (Position_angle <= 1) Position_angle = 1;
+    if (Position_angle >= 17) Position_angle = 17;
+    myservo.attach(PIN_Servo_z);
+    myservo.write(10 * Position_angle);
+  }
+  if (Servo == 2 || Servo == 3) //Servo_y
+  {
+    if (Position_angle <= 3) Position_angle = 3;
+    if (Position_angle >= 11) Position_angle = 11;
+    myservo.attach(PIN_Servo_y);
+    myservo.write(10 * Position_angle);
+  }
 }
 
 /*IRrecv*/

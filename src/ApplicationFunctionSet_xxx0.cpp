@@ -41,6 +41,22 @@ function_xxx(long x, long s, long e) //f(x)
   else
     return false;
 }
+
+static inline bool tracking_hysteresis_low(
+  int value,
+  bool was_on,
+  uint16_t on_threshold,
+  uint16_t off_threshold,
+  uint16_t high_limit)
+{
+  // Enter "line detected" at a higher threshold, but keep it latched
+  // until a slightly lower threshold to reduce jitter at edges.
+  if (was_on)
+  {
+    return (off_threshold <= value && value <= high_limit);
+  }
+  return (on_threshold <= value && value <= high_limit);
+}
 static void
 delay_xxx(uint16_t _ms)
 {
@@ -575,10 +591,22 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Rocker(void)
 /*Line tracking mode*/
 void ApplicationFunctionSet::ApplicationFunctionSet_Tracking(void)
 {
-  // UpdateTrackingSensors();
+  // Tracking tunables for black line centered between white tape.
+  // Based on your measurements: black is typically >= 700.
+  const uint8_t TRACK_SPEED_FWD = 100;
+  const uint8_t TRACK_SPEED_TURN = 125;       // normal line-correction turns
+  const uint8_t TRACK_SPEED_BLIND_TURN = 110; // slower blind-search turns reduce overshoot
+  const uint16_t TRACK_DETECT_ON = 680;   // enter line-detected state
+  const uint16_t TRACK_DETECT_OFF = 620;  // leave line-detected state (hysteresis)
+  const uint16_t TRACK_DETECT_HIGH = 980; // reject saturated/noisy highs if needed
+
   static boolean timestamp = true;
   static boolean BlindDetection = true;
   static unsigned long MotorRL_time = 0;
+  static bool lineL_on = false;
+  static bool lineM_on = false;
+  static bool lineR_on = false;
+
   if (Application_SmartRobotCarxxx0.Functional_Mode == TraceBased_mode)
   {
     if (Car_LeaveTheGround == false) //Check if the car leaves the ground
@@ -587,40 +615,62 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Tracking(void)
       return;
     }
 
-    // int getAnaloguexxx_L = AppITR20001.DeviceDriverSet_ITR20001_getAnaloguexxx_L();
-    // int getAnaloguexxx_M = AppITR20001.DeviceDriverSet_ITR20001_getAnaloguexxx_M();
-    // int getAnaloguexxx_R = AppITR20001.DeviceDriverSet_ITR20001_getAnaloguexxx_R();
+    const uint16_t detect_on = TRACK_DETECT_ON;
+    const uint16_t detect_off = TRACK_DETECT_OFF;
+    const uint16_t detect_hi = TRACK_DETECT_HIGH;
+
+    lineL_on = tracking_hysteresis_low(TrackingData_L, lineL_on, detect_on, detect_off, detect_hi);
+    lineM_on = tracking_hysteresis_low(TrackingData_M, lineM_on, detect_on, detect_off, detect_hi);
+    lineR_on = tracking_hysteresis_low(TrackingData_R, lineR_on, detect_on, detect_off, detect_hi);
+
+    // Keep exported status aligned with filtered decisions while in tracking mode.
+    TrackingDetectionStatus_L = lineL_on;
+    TrackingDetectionStatus_M = lineM_on;
+    TrackingDetectionStatus_R = lineR_on;
+
 #if _Test_print
     static unsigned long print_time = 0;
-    if (millis() - print_time > 500)
+    if (millis() - print_time > 250)
     {
       print_time = millis();
-      Serial.print("ITR20001_getAnaloguexxx_L=");
-      Serial.println(getAnaloguexxx_L);
-      Serial.print("ITR20001_getAnaloguexxx_M=");
-      Serial.println(getAnaloguexxx_M);
-      Serial.print("ITR20001_getAnaloguexxx_R=");
-      Serial.println(getAnaloguexxx_R);
+      Serial.print("ITR L=");
+      Serial.print(TrackingData_L);
+      Serial.print(" M=");
+      Serial.print(TrackingData_M);
+      Serial.print(" R=");
+      Serial.print(TrackingData_R);
+      Serial.print(" | On=");
+      Serial.print(TRACK_DETECT_ON);
+      Serial.print(" Off=");
+      Serial.print(TRACK_DETECT_OFF);
+      Serial.print(" Hi=");
+      Serial.print(TRACK_DETECT_HIGH);
+      Serial.print(" | L_in=");
+      Serial.print(lineL_on);
+      Serial.print(" M_in=");
+      Serial.print(lineM_on);
+      Serial.print(" R_in=");
+      Serial.println(lineR_on);
     }
 #endif
-    if (function_xxx(TrackingData_M, TrackingDetection_S, TrackingDetection_E))
+    if (lineM_on)
     {
       /*Achieve straight and uniform speed movement*/
-      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, 100);
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Forward, TRACK_SPEED_FWD);
       timestamp = true;
       BlindDetection = true;
     }
-    else if (function_xxx(TrackingData_R, TrackingDetection_S, TrackingDetection_E))
+    else if (lineR_on)
     {
       /*Turn right*/
-      ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 100);
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Right, TRACK_SPEED_TURN);
       timestamp = true;
       BlindDetection = true;
     }
-    else if (function_xxx(TrackingData_L, TrackingDetection_S, TrackingDetection_E))
+    else if (lineL_on)
     {
       /*Turn left*/
-      ApplicationFunctionSet_SmartRobotCarMotionControl(Left, 100);
+      ApplicationFunctionSet_SmartRobotCarMotionControl(Left, TRACK_SPEED_TURN);
       timestamp = true;
       BlindDetection = true;
     }
@@ -635,11 +685,11 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Tracking(void)
       /*Blind Detection*/
       if ((function_xxx((millis() - MotorRL_time), 0, 200) || function_xxx((millis() - MotorRL_time), 1600, 2000)) && BlindDetection == true)
       {
-        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, 100);
+        ApplicationFunctionSet_SmartRobotCarMotionControl(Right, TRACK_SPEED_BLIND_TURN);
       }
       else if (((function_xxx((millis() - MotorRL_time), 200, 1600))) && BlindDetection == true)
       {
-        ApplicationFunctionSet_SmartRobotCarMotionControl(Left, 100);
+        ApplicationFunctionSet_SmartRobotCarMotionControl(Left, TRACK_SPEED_BLIND_TURN);
       }
       else if ((function_xxx((millis() - MotorRL_time), 3000, 3500))) // Blind Detection ...s ?
       {
@@ -653,6 +703,9 @@ void ApplicationFunctionSet::ApplicationFunctionSet_Tracking(void)
     BlindDetection = true;
     timestamp = true;
     MotorRL_time = 0;
+    lineL_on = false;
+    lineM_on = false;
+    lineR_on = false;
   }
 }
 

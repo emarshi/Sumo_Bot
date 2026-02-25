@@ -32,6 +32,7 @@ DeviceDriverSet_Motor AppMotor;
 DeviceDriverSet_ULTRASONIC AppULTRASONIC;
 DeviceDriverSet_Servo AppServo;
 DeviceDriverSet_IRrecv AppIRrecv;
+static volatile bool g_tracking_celebration_request = false;
 /*f(x) int */
 static boolean
 function_xxx(long x, long s, long e) //f(x)
@@ -2133,115 +2134,20 @@ void ApplicationFunctionSet::ApplicationFunctionSet_KeyCommand(void)
 /*Infrared remote control*/
 void ApplicationFunctionSet::ApplicationFunctionSet_IRrecv(void)
 {
-  uint8_t IRrecv_button;
-  static bool IRrecv_en = false;
-  if (AppIRrecv.DeviceDriverSet_IRrecv_Get(&IRrecv_button /*out*/))
+  uint8_t IRrecv_button = 0;
+  if (!AppIRrecv.DeviceDriverSet_IRrecv_Get(&IRrecv_button /*out*/))
   {
-    IRrecv_en = true;
-    //Serial.println(IRrecv_button);
+    return;
   }
-  if (true == IRrecv_en)
+
+  // Only allow DOWN button (code 2) to trigger celebration.
+  // All other IR buttons are intentionally ignored.
+  if (IRrecv_button == 2)
   {
-    switch (IRrecv_button)
-    {
-    case /* constant-expression */ 1:
-      /* code */
-      Application_SmartRobotCarxxx0.Motion_Control = Forward;
-      break;
-    case /* constant-expression */ 2:
-      /* code */
-      Application_SmartRobotCarxxx0.Motion_Control = Backward;
-      break;
-    case /* constant-expression */ 3:
-      /* code */
-      Application_SmartRobotCarxxx0.Motion_Control = Left;
-      break;
-    case /* constant-expression */ 4:
-      /* code */
-      Application_SmartRobotCarxxx0.Motion_Control = Right;
-      break;
-    case /* constant-expression */ 5:
-      /* code */
-      Application_SmartRobotCarxxx0.Functional_Mode = Standby_mode;
-      break;
-    case /* constant-expression */ 6:
-      /* code */ Application_SmartRobotCarxxx0.Functional_Mode = TraceBased_mode;
-      break;
-    case /* constant-expression */ 7:
-      /* code */ Application_SmartRobotCarxxx0.Functional_Mode = ObstacleAvoidance_mode;
-      break;
-    case /* constant-expression */ 8:
-      /* code */ Application_SmartRobotCarxxx0.Functional_Mode = Follow_mode;
-      break;
-    case /* constant-expression */ 9:
-      /* code */ if (Application_SmartRobotCarxxx0.Functional_Mode == TraceBased_mode) //Adjust the threshold of the line tracking module to adapt the actual environment
-      {
-        if (TrackingDetection_S < 600)
-        {
-          TrackingDetection_S += 10;
-        }
-      }
-
-      break;
-    case /* constant-expression */ 10:
-      /* code */ if (Application_SmartRobotCarxxx0.Functional_Mode == TraceBased_mode)
-      {
-        TrackingDetection_S = 250;
-      }
-      break;
-    case /* constant-expression */ 11:
-      /* code */ if (Application_SmartRobotCarxxx0.Functional_Mode == TraceBased_mode)
-      {
-        if (TrackingDetection_S > 30)
-        {
-          TrackingDetection_S -= 10;
-        }
-      }
-      break;
-
-    case /* constant-expression */ 12:
-    {
-      if (Rocker_CarSpeed < 255)
-      {
-        Rocker_CarSpeed += 5;
-      }
-    }
-    break;
-    case /* constant-expression */ 13:
-    {
-      Rocker_CarSpeed = 250;
-    }
-    break;
-    case /* constant-expression */ 14:
-    {
-      if (Rocker_CarSpeed > 50)
-      {
-        Rocker_CarSpeed -= 5;
-      }
-    }
-    break;
-
-    default:
-      Application_SmartRobotCarxxx0.Functional_Mode = Standby_mode;
-      break;
-    }
-    /*achieve time-limited control on movement direction part*/
-    if (IRrecv_button < 5)
-    {
-      Application_SmartRobotCarxxx0.Functional_Mode = Rocker_mode;
-      if (millis() - AppIRrecv.IR_PreMillis > 300)
-      {
-        IRrecv_en = false;
-        Application_SmartRobotCarxxx0.Functional_Mode = Standby_mode;
-        AppIRrecv.IR_PreMillis = millis();
-      }
-    }
-    else
-    {
-      IRrecv_en = false;
-      AppIRrecv.IR_PreMillis = millis();
-    }
+    g_tracking_celebration_request = true;
+    Application_SmartRobotCarxxx0.Motion_Control = stop_it;
   }
+  AppIRrecv.IR_PreMillis = millis();
 }
 /*Data analysis on serial port*/
 void ApplicationFunctionSet::ApplicationFunctionSet_SerialPortDataAnalysis(void)

@@ -28,7 +28,7 @@ void loop()
   Application_FunctionSet.ApplicationFunctionSet_Tracking();
   //Application_FunctionSet.ApplicationFunctionSet_Rocker();
   Application_FunctionSet.ApplicationFunctionSet_Standby();
-  //Application_FunctionSet.ApplicationFunctionSet_IRrecv();
+  Application_FunctionSet.ApplicationFunctionSet_IRrecv();
   Application_FunctionSet.ApplicationFunctionSet_SerialPortDataAnalysis();
 
   Application_FunctionSet.CMD_ServoControl_xxx0();

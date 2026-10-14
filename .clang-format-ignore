@@ -1,0 +1,9 @@
+# Generated output and bundled third-party libraries.
+.pio/**
+src/IRremote.cpp
+src/IRremote.h
+src/IRremoteInt.h
+src/I2Cdev.cpp
+src/I2Cdev.h
+src/MPU6050.cpp
+src/MPU6050.h

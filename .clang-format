@@ -1,0 +1,15 @@
+BasedOnStyle: LLVM
+IndentWidth: 2
+ContinuationIndentWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+IndentCaseLabels: true
+AccessModifierOffset: -2
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+SortIncludes: false
+ReflowComments: false
+SeparateDefinitionBlocks: Always
+LineEnding: CRLF

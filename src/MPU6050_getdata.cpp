@@ -42,7 +42,8 @@ bool MPU6050_getdata::MPU6050_dveInit(void)
     {
       return true;
     }
-  } while (chip_id == 0X00 || chip_id == 0XFF); //Ensure that the slave device is online（Wait forcibly to get the ID）
+  } while (chip_id == 0X00 ||
+           chip_id == 0XFF); //Ensure that the slave device is online（Wait forcibly to get the ID）
   accelgyro.initialize();
   // unsigned short times = 100; //Sampling times
   // for (int i = 0; i < times; i++)
@@ -53,6 +54,7 @@ bool MPU6050_getdata::MPU6050_dveInit(void)
   // gzo /= times; //Calculate gyroscope offset
   return false;
 }
+
 bool MPU6050_getdata::MPU6050_calibration(void)
 {
   unsigned short times = 100; //Sampling times
@@ -66,6 +68,7 @@ bool MPU6050_getdata::MPU6050_calibration(void)
   // gzo = accelgyro.getRotationZ();
   return false;
 }
+
 bool MPU6050_getdata::MPU6050_dveGetEulerAngles(float *Yaw)
 {
   unsigned long now = millis();           //Record the current time(ms)

@@ -9,6 +9,7 @@
 #ifndef _MPU6050_getdata_H_
 #define _MPU6050_getdata_H_
 #include <Arduino.h>
+
 class MPU6050_getdata
 {
 public:

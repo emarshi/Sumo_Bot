@@ -2113,15 +2113,15 @@ void ApplicationFunctionSet::ApplicationFunctionSet_KeyCommand(void)
       /* code */
       Application_SmartRobotCarxxx0.Functional_Mode = TraceBased_mode;
       break;
+    // case /* constant-expression */ 2:
+    //   /* code */
+    //   Application_SmartRobotCarxxx0.Functional_Mode = ObstacleAvoidance_mode;
+    //   break;
     case /* constant-expression */ 2:
-      /* code */
-      Application_SmartRobotCarxxx0.Functional_Mode = ObstacleAvoidance_mode;
-      break;
-    case /* constant-expression */ 3:
       /* code */
       Application_SmartRobotCarxxx0.Functional_Mode = Follow_mode;
       break;
-    case /* constant-expression */ 4:
+    case /* constant-expression */ 3:
       /* code */
       Application_SmartRobotCarxxx0.Functional_Mode = Standby_mode;
       break;
@@ -2144,8 +2144,7 @@ void ApplicationFunctionSet::ApplicationFunctionSet_IRrecv(void)
   // All other IR buttons are intentionally ignored.
   if (IRrecv_button == 2)
   {
-    g_tracking_celebration_request = true;
-    Application_SmartRobotCarxxx0.Motion_Control = stop_it;
+    Application_SmartRobotCarxxx0.Functional_Mode = Follow_mode;
   }
   AppIRrecv.IR_PreMillis = millis();
 }
